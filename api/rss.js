@@ -32,6 +32,7 @@ function mimeFromUrl(u) {
   } catch {}
   return "image/jpeg";
 }
+
 const firstImgFromHtml = (html) =>
   html ? (html.match(/<img[^>]+src=["']([^"']+)["']/i)?.[1] ?? null) : null;
 
@@ -71,6 +72,7 @@ export default async function handler(req, res) {
           return feed.items.map((it) => {
             const publishedISO =
               it.isoDate || it.pubDate || it["dc:date"] || new Date().toISOString();
+
             const image = pickImage(it, base);
             const description =
               it.contentSnippet || it.summary || it["content:encoded"] || it.content || "";
@@ -99,10 +101,8 @@ export default async function handler(req, res) {
       id: `${siteUrl}/`,
       link: `${siteUrl}/`,
       language: "en",
-      favicon:
-        "https://cdn.prod.website-files.com/683ffb660726a2d09bc46217/68e61815eb8d0dfb4cb3536f_cura-favicon.png",
-      image:
-        "https://cdn.prod.website-files.com/683ffb660726a2d09bc46217/68feee3558458969f98a1007_cura-logo-512.jpg",
+      favicon: "https://cdn.prod.website-files.com/683ffb660726a2d09bc46217/68e61815eb8d0dfb4cb3536f_cura-favicon.png",
+      image: "https://cdn.prod.website-files.com/683ffb660726a2d09bc46217/68feee3558458969f98a1007_cura-logo-512.jpg",
       updated: items[0]?.date || new Date(),
       feedLinks: { rss2: `${siteUrl}/rss.xml` },
       generator: "CURA unified feed"
@@ -119,15 +119,21 @@ export default async function handler(req, res) {
         link: it.link,
         description: descWithImg,
         date: it.date,
-        // Keep an <enclosure> for strict parsers
+        // keep an enclosure for strict parsers
         enclosure: it.image
           ? { url: it.image, type: mimeFromUrl(it.image) }
           : undefined,
-        // Add Media RSS tags (the shape many Webflow feeds use)
+        // ✅ proper Media RSS tags with attributes
         extensions: it.image
           ? [
-              { name: "media:content", attributes: { url: it.image, medium: "image" } },
-              { name: "media:thumbnail", attributes: { url: it.image } }
+              {
+                name: "media:content",
+                objects: [{ _attr: { url: it.image, medium: "image" } }]
+              },
+              {
+                name: "media:thumbnail",
+                objects: [{ _attr: { url: it.image } }]
+              }
             ]
           : []
       };
