@@ -43,32 +43,33 @@ const toAbs = (url, base) => {
 
 function pickImage(it, baseUrl) {
   if (it.enclosure?.url) return toAbs(it.enclosure.url, baseUrl);
-
   const tn = it["media:thumbnail"];
   if (tn) {
     if (typeof tn === "string") return toAbs(tn, baseUrl);
     if (tn.url) return toAbs(tn.url, baseUrl);
   }
-
   const mc = it["media:content"];
   if (Array.isArray(mc) && mc[0]?.$?.url) return toAbs(mc[0].$.url, baseUrl);
   if (mc?.$?.url) return toAbs(mc.$.url, baseUrl);
-
   const htmlImg =
     firstImgFromHtml(it["content:encoded"]) || firstImgFromHtml(it.content);
   if (htmlImg) return toAbs(htmlImg, baseUrl);
-
   return null;
+}
+
+// escape text for use in a RegExp literal
+function rxEscape(str) {
+  return str.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
 }
 
 export default async function handler(req, res) {
   try {
+    // 1) Fetch & normalize
     const lists = await Promise.all(
       SOURCES.map(async (url) => {
         try {
           const feed = await parser.parseURL(url);
           const base = feed.link || url;
-
           return feed.items.map((it) => {
             const publishedISO =
               it.isoDate || it.pubDate || it["dc:date"] || new Date().toISOString();
@@ -94,6 +95,7 @@ export default async function handler(req, res) {
 
     const items = lists.flat().sort((a, b) => b.date - a.date).slice(0, 50);
 
+    // 2) Build base RSS with feed lib
     const siteUrl = "https://curaforthegamer.com";
     const feed = new Feed({
       title: "CURA",
@@ -101,55 +103,58 @@ export default async function handler(req, res) {
       id: `${siteUrl}/`,
       link: `${siteUrl}/`,
       language: "en",
-      favicon: "https://cdn.prod.website-files.com/683ffb660726a2d09bc46217/68e61815eb8d0dfb4cb3536f_cura-favicon.png",
-      image: "https://cdn.prod.website-files.com/683ffb660726a2d09bc46217/68feee3558458969f98a1007_cura-logo-512.jpg",
+      favicon:
+        "https://cdn.prod.website-files.com/683ffb660726a2d09bc46217/68e61815eb8d0dfb4cb3536f_cura-favicon.png",
+      image:
+        "https://cdn.prod.website-files.com/683ffb660726a2d09bc46217/68feee3558458969f98a1007_cura-logo-512.jpg",
       updated: items[0]?.date || new Date(),
       feedLinks: { rss2: `${siteUrl}/rss.xml` },
       generator: "CURA unified feed"
     });
 
     items.forEach((it) => {
-      const descWithImg = it.image
-        ? `<p><img src="${it.image}" alt=""/></p>${it.description}`
-        : it.description;
-
       const item = {
         title: it.title,
         id: it.link,
         link: it.link,
-        description: descWithImg,
+        description: it.image
+          ? `<p><img src="${it.image}" alt=""/></p>${it.description}`
+          : it.description,
         date: it.date,
-        // keep an enclosure for strict parsers
         enclosure: it.image
           ? { url: it.image, type: mimeFromUrl(it.image) }
-          : undefined,
-        // ✅ proper Media RSS tags with attributes
-        extensions: it.image
-          ? [
-              {
-                name: "media:content",
-                objects: [{ _attr: { url: it.image, medium: "image" } }]
-              },
-              {
-                name: "media:thumbnail",
-                objects: [{ _attr: { url: it.image } }]
-              }
-            ]
-          : []
+          : undefined
       };
-
       feed.addItem(item);
     });
 
-    // Generate XML
+    // 3) Generate XML
     let xml = feed.rss2();
 
-    // Ensure the Media RSS namespace is present on the root <rss>
+    // 4) Add Media RSS namespace if missing
     if (!/xmlns:media=/.test(xml)) {
       xml = xml.replace(
         /<rss([^>]*)>/,
         `<rss$1 xmlns:media="http://search.yahoo.com/mrss/">`
       );
+    }
+
+    // 5) Inject proper <media:content> and <media:thumbnail> per item (no <_attr>)
+    //    We find each <item> block by its <link> and append media tags before </item>.
+    for (const it of items) {
+      if (!it.image || !it.link) continue;
+
+      const mediaTags =
+        `\n      <media:content url="${it.image}" medium="image"/>` +
+        `\n      <media:thumbnail url="${it.image}"/>`;
+
+      // Match the specific item by its <link> value
+      const linkXml = `<link>${it.link}</link>`;
+      const itemPattern = new RegExp(
+        `(\\<item\\>[\\s\\S]*?${rxEscape(linkXml)}[\\s\\S]*?)(\\<\\/item\\>)`
+      );
+
+      xml = xml.replace(itemPattern, `$1${mediaTags}\n    $2`);
     }
 
     res.setHeader("Content-Type", "application/rss+xml; charset=utf-8");
