@@ -60,8 +60,8 @@ export default async function handler(req, res) {
 
     const siteUrl = "https://curaforthegamer.com";
     const feed = new Feed({
-      title: "CURA — All Updates",
-      description: "The useful, the interesting, the worth-your-time from CURA (Play, Optimize, Gear, Beyond).",
+      title: "CURA",
+      description: "Curating for gamers. The useful, the interesting, the worthwhile.",
       id: `${siteUrl}/`,
       link: `${siteUrl}/`,
       language: "en",
