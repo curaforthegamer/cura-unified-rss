@@ -1,0 +1,3 @@
+{
+  "rewrites": [{ "source": "/rss.xml", "destination": "/api/rss" }]
+}
