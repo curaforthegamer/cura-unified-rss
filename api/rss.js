@@ -1,6 +1,7 @@
 import Parser from "rss-parser";
 import { Feed } from "feed";
 
+// --- Source Webflow feeds (one per CMS Collection) ---
 const SOURCES = [
   "https://curaforthegamer.com/play/rss.xml",
   "https://curaforthegamer.com/optimize/rss.xml",
@@ -8,6 +9,7 @@ const SOURCES = [
   "https://curaforthegamer.com/beyond/rss.xml"
 ];
 
+// ---------- Parser setup ----------
 const parser = new Parser({
   customFields: {
     feed: [["link", "link"]],
@@ -20,6 +22,7 @@ const parser = new Parser({
   }
 });
 
+// ---------- Utilities ----------
 function mimeFromUrl(u) {
   try {
     const ext = new URL(u).pathname.split(".").pop()?.toLowerCase();
@@ -42,34 +45,58 @@ const toAbs = (url, base) => {
 };
 
 function pickImage(it, baseUrl) {
+  // 1) enclosure
   if (it.enclosure?.url) return toAbs(it.enclosure.url, baseUrl);
+
+  // 2) media:thumbnail
   const tn = it["media:thumbnail"];
   if (tn) {
     if (typeof tn === "string") return toAbs(tn, baseUrl);
     if (tn.url) return toAbs(tn.url, baseUrl);
   }
+
+  // 3) media:content
   const mc = it["media:content"];
   if (Array.isArray(mc) && mc[0]?.$?.url) return toAbs(mc[0].$.url, baseUrl);
   if (mc?.$?.url) return toAbs(mc.$.url, baseUrl);
+
+  // 4) inline <img>
   const htmlImg =
     firstImgFromHtml(it["content:encoded"]) || firstImgFromHtml(it.content);
   if (htmlImg) return toAbs(htmlImg, baseUrl);
+
   return null;
 }
 
-// escape text for use in a RegExp literal
+// HEAD request to fetch Content-Length (Best Fix); omit length if unavailable.
+async function headContentLength(url, timeoutMs = 2500) {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const resp = await fetch(url, { method: "HEAD", signal: ctrl.signal });
+    clearTimeout(timer);
+    const len = resp.headers.get("content-length");
+    return len && /^\d+$/.test(len) ? String(len) : null;
+  } catch {
+    return null;
+  }
+}
+
+// escape text for RegExp literal
 function rxEscape(str) {
   return str.replace(/[-/\\^$*+?.()|[\]{}]/g, "\\$&");
 }
 
+// ---------- Handler ----------
 export default async function handler(req, res) {
   try {
-    // 1) Fetch & normalize
+    // 1) Fetch & normalize items from all source feeds
     const lists = await Promise.all(
       SOURCES.map(async (url) => {
         try {
           const feed = await parser.parseURL(url);
           const base = feed.link || url;
+
           return feed.items.map((it) => {
             const publishedISO =
               it.isoDate || it.pubDate || it["dc:date"] || new Date().toISOString();
@@ -93,9 +120,16 @@ export default async function handler(req, res) {
       })
     );
 
+    // 2) Flatten, sort, cap to 50
     const items = lists.flat().sort((a, b) => b.date - a.date).slice(0, 50);
 
-    // 2) Build base RSS with feed lib
+    // 3) Precompute Content-Length for enclosures in parallel (Best Fix)
+    //    If HEAD fails, we'll omit the length attribute.
+    const lengths = await Promise.all(
+      items.map((it) => (it.image ? headContentLength(it.image) : Promise.resolve(null)))
+    );
+
+    // 4) Build base RSS via 'feed'
     const siteUrl = "https://curaforthegamer.com";
     const feed = new Feed({
       title: "CURA",
@@ -112,26 +146,34 @@ export default async function handler(req, res) {
       generator: "CURA unified feed"
     });
 
-    items.forEach((it) => {
-      const item = {
+    items.forEach((it, idx) => {
+      const descWithImg = it.image
+        ? `<p><img src="${it.image}" alt=""/></p>${it.description}`
+        : it.description;
+
+      const enclosureBase = it.image
+        ? { url: it.image, type: mimeFromUrl(it.image) }
+        : undefined;
+
+      // Only add length if we have a real number (never "0")
+      if (enclosureBase && lengths[idx]) {
+        enclosureBase.length = lengths[idx];
+      }
+
+      feed.addItem({
         title: it.title,
         id: it.link,
         link: it.link,
-        description: it.image
-          ? `<p><img src="${it.image}" alt=""/></p>${it.description}`
-          : it.description,
+        description: descWithImg,
         date: it.date,
-        enclosure: it.image
-          ? { url: it.image, type: mimeFromUrl(it.image) }
-          : undefined
-      };
-      feed.addItem(item);
+        enclosure: enclosureBase
+      });
     });
 
-    // 3) Generate XML
+    // 5) Generate XML
     let xml = feed.rss2();
 
-    // 4) Add Media RSS namespace if missing
+    // 6) Ensure Media RSS namespace exists on <rss>
     if (!/xmlns:media=/.test(xml)) {
       xml = xml.replace(
         /<rss([^>]*)>/,
@@ -139,8 +181,7 @@ export default async function handler(req, res) {
       );
     }
 
-    // 5) Inject proper <media:content> and <media:thumbnail> per item (no <_attr>)
-    //    We find each <item> block by its <link> and append media tags before </item>.
+    // 7) Inject Media RSS tags (self-closing with attributes) for each item that has an image
     for (const it of items) {
       if (!it.image || !it.link) continue;
 
@@ -148,7 +189,6 @@ export default async function handler(req, res) {
         `\n      <media:content url="${it.image}" medium="image"/>` +
         `\n      <media:thumbnail url="${it.image}"/>`;
 
-      // Match the specific item by its <link> value
       const linkXml = `<link>${it.link}</link>`;
       const itemPattern = new RegExp(
         `(\\<item\\>[\\s\\S]*?${rxEscape(linkXml)}[\\s\\S]*?)(\\<\\/item\\>)`
@@ -157,6 +197,10 @@ export default async function handler(req, res) {
       xml = xml.replace(itemPattern, `$1${mediaTags}\n    $2`);
     }
 
+    // 8) Safety: strip any accidental length="0" that some parsers might inject downstream
+    xml = xml.replace(/(<enclosure\b[^>]*?)\s+length="0"([^>]*>)/g, "$1$2");
+
+    // 9) Send
     res.setHeader("Content-Type", "application/rss+xml; charset=utf-8");
     res.setHeader(
       "Cache-Control",
