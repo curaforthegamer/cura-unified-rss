@@ -8,8 +8,7 @@ const SOURCES = [
   "https://curaforthegamer.com/beyond/rss.xml"
 ];
 
-// Where your unified feed is served (root on your subdomain is OK)
-// (No trailing slash)
+// Where your unified feed is served (no trailing slash)
 const SELF_FEED_URL = "https://feed.curaforthegamer.com";
 
 // ---- Parser setup ----
@@ -98,6 +97,31 @@ async function headContentLength(url, timeoutMs = 2500) {
   }
 }
 
+// Pretty-print XML for human readability (ignored by RSS clients)
+function prettyXml(xml) {
+  try {
+    const normalized = xml.replace(/>\s+</g, '><').replace(/></g, '>\n<');
+    const lines = normalized.split('\n');
+    const indent = '  ';
+    let depth = 0;
+    const out = [];
+
+    for (let line of lines) {
+      line = line.trim();
+      // closing tag reduces depth first
+      if (/^<\/[^>]+>/.test(line)) depth = Math.max(depth - 1, 0);
+
+      out.push(indent.repeat(depth) + line);
+
+      // opening tag (not self-closing/comment/declaration) increases depth
+      if (/^<[^!?/][^>]*[^/]>$/.test(line)) depth++;
+    }
+    return out.join('\n');
+  } catch {
+    return xml;
+  }
+}
+
 export default async function handler(req, res) {
   try {
     // 1) Fetch & normalize
@@ -139,8 +163,8 @@ export default async function handler(req, res) {
     );
 
     // 4) Build RSS manually (full control & compatibility)
-    const channelTitle = "CURA"; // <- as requested
-    const channelLink = "https://curaforthegamer.com"; // <- no trailing slash
+    const channelTitle = "CURA";
+    const channelLink = "https://curaforthegamer.com"; // no trailing slash
     const channelDesc = "Curating for gamers. The useful, the interesting, the worthwhile.";
     const channelImage = "https://cdn.prod.website-files.com/683ffb660726a2d09bc46217/68feee3558458969f98a1007_cura-logo-512.jpg";
     const channelFavicon = "https://cdn.prod.website-files.com/683ffb660726a2d09bc46217/68e61815eb8d0dfb4cb3536f_cura-favicon.png";
@@ -162,9 +186,7 @@ export default async function handler(req, res) {
       `<generator>CURA unified feed</generator>` +
       `<language>en</language>` +
       `<atom:link href="${xmlEscape(SELF_FEED_URL)}" rel="self" type="application/rss+xml"/>` +
-      // Channel image (some readers show this)
       `<image><title>${xmlEscape(channelTitle)}</title><url>${xmlEscape(channelImage)}</url><link>${xmlEscape(channelLink)}</link></image>` +
-      // Some readers look for a favicon (optional but harmless)
       `<icon>${xmlEscape(channelFavicon)}</icon>`;
 
     for (let i = 0; i < items.length; i++) {
@@ -207,9 +229,15 @@ export default async function handler(req, res) {
     // Safety: never allow length="0" to slip in
     xml = xml.replace(/(<enclosure\b[^>]*?)\s+length="0"([^>]*>)/g, "$1$2");
 
+    // Pretty-print unless explicitly disabled (?pretty=0)
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const pretty = url.searchParams.get('pretty') !== '0';
+    if (pretty) {
+      xml = prettyXml(xml);
+    }
+
     // Send
     res.setHeader("Content-Type", "application/rss+xml; charset=utf-8");
-    // CDN caching: 15 minutes; allow stale for 24h while revalidating
     res.setHeader(
       "Cache-Control",
       "public, max-age=0, s-maxage=900, stale-while-revalidate=86400"
